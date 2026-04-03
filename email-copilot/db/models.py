@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS drafts (
     draft_text TEXT NOT NULL,
     status TEXT DEFAULT 'pending',
     telegram_message_id INTEGER,
+    followup_reminded INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
 );
@@ -33,11 +34,30 @@ CREATE TABLE IF NOT EXISTS preferences (
     value TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS reply_intents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email_id TEXT NOT NULL REFERENCES emails(id),
+    intent TEXT NOT NULL,
+    confidence REAL DEFAULT 0.0,
+    reason TEXT DEFAULT '',
+    suggested_action TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_text TEXT NOT NULL,
+    active INTEGER DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_emails_thread ON emails(thread_id);
 CREATE INDEX IF NOT EXISTS idx_emails_received ON emails(received_at);
 CREATE INDEX IF NOT EXISTS idx_emails_importance ON emails(importance);
 CREATE INDEX IF NOT EXISTS idx_drafts_status ON drafts(status);
 CREATE INDEX IF NOT EXISTS idx_drafts_email ON drafts(email_id);
+CREATE INDEX IF NOT EXISTS idx_reply_intents_email ON reply_intents(email_id);
+CREATE INDEX IF NOT EXISTS idx_rules_active ON rules(active);
 """
 
 

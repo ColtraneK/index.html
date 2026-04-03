@@ -27,6 +27,29 @@ def confirm_send_keyboard(draft_id: int) -> InlineKeyboardMarkup:
     ])
 
 
+def followup_keyboard(draft_id: int, email_id: str) -> InlineKeyboardMarkup:
+    """Keyboard for follow-up reminder actions."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Draft Follow-up", callback_data=f"followup_draft:{draft_id}"),
+            InlineKeyboardButton("Dismiss", callback_data=f"followup_dismiss:{draft_id}"),
+        ],
+        [
+            InlineKeyboardButton("Snooze 24h", callback_data=f"followup_snooze:{draft_id}"),
+        ],
+    ])
+
+
+def reply_intent_keyboard(email_id: str) -> InlineKeyboardMarkup:
+    """Keyboard shown after reply intent classification."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Draft Reply", callback_data=f"intent_reply:{email_id}"),
+            InlineKeyboardButton("Dismiss", callback_data=f"intent_dismiss:{email_id}"),
+        ],
+    ])
+
+
 def settings_keyboard() -> InlineKeyboardMarkup:
     """Settings menu keyboard."""
     return InlineKeyboardMarkup([

@@ -7,11 +7,14 @@ from telegram import Bot
 
 import config
 from ai.drafter import draft_reply
+from ai.reply_classifier import classify_reply
 from ai.triage import classify_importance
-from bot.formatter import format_batch_summary, format_email_notification
-from bot.keyboards import draft_action_keyboard
+from bot.formatter import format_batch_summary, format_email_notification, format_reply_intent
+from bot.keyboards import draft_action_keyboard, reply_intent_keyboard
 from db import operations as db_ops
 from gmail.client import GmailClient
+from rules import match_rules
+from rules import storage as rules_storage
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +61,7 @@ class EmailPoller:
             await self._process_email(email)
 
     async def _process_email(self, email: dict) -> None:
-        """Process a single new email through triage → draft → notify."""
+        """Process a single new email through rules → triage → draft → notify."""
         # Save to DB (skip if already exists)
         is_new = await db_ops.save_email(
             self.db,
@@ -75,29 +78,114 @@ class EmailPoller:
         if not is_new:
             return
 
-        # Triage
-        triage = await classify_importance(
+        # Check if this is a reply in an existing thread (for reply classification)
+        await self._check_if_reply(email)
+
+        # Apply user-defined rules
+        force_draft = False
+        rule_importance = None
+
+        rules = await rules_storage.get_all_rules(self.db)
+        if rules:
+            matched = await match_rules(
+                self.openai,
+                config.OPENAI_MODEL,
+                rules,
+                email["subject"],
+                email["body_text"],
+                email["from_address"],
+                email["from_name"],
+            )
+            for m in matched:
+                action = m.get("action")
+                if action == "set_importance":
+                    rule_importance = m.get("value", "medium")
+                    logger.info("Rule #%s set importance to %s", m.get("rule_id"), rule_importance)
+                elif action == "archive":
+                    rule_importance = "low"
+                    logger.info("Rule #%s archived email", m.get("rule_id"))
+                elif action == "always_draft":
+                    force_draft = True
+                    logger.info("Rule #%s forced draft generation", m.get("rule_id"))
+                elif action == "skip":
+                    logger.info("Rule #%s skipped email", m.get("rule_id"))
+                    return
+
+        # Triage (use rule override if present)
+        if rule_importance:
+            importance = rule_importance
+        else:
+            triage = await classify_importance(
+                self.openai,
+                config.OPENAI_MODEL,
+                email["subject"],
+                email["body_text"],
+                email["from_name"],
+            )
+            importance = triage["importance"]
+
+        await db_ops.update_email_importance(self.db, email["id"], importance)
+
+        logger.info(
+            "Email from %s classified as %s%s",
+            email["from_name"],
+            importance,
+            " (rule override)" if rule_importance else "",
+        )
+
+        if importance == "high" or force_draft:
+            await self._notify_high_priority(email)
+        # Medium emails are batched (handled by batch_summary)
+        # Low emails are silently archived
+
+    async def _check_if_reply(self, email: dict) -> None:
+        """If this email is a reply in a thread we've sent to, classify the intent."""
+        # Check if we have any sent drafts in this thread
+        cursor = await self.db.execute(
+            """SELECT d.*, e.subject, e.body_text as orig_body
+               FROM drafts d JOIN emails e ON d.email_id = e.id
+               WHERE e.thread_id = ? AND d.status = 'sent'
+               ORDER BY d.updated_at DESC LIMIT 1""",
+            (email["thread_id"],),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return
+
+        sent_draft = dict(row)
+        logger.info("Reply detected in thread %s from %s - classifying intent",
+                     email["thread_id"], email["from_name"])
+
+        intent_data = await classify_reply(
             self.openai,
             config.OPENAI_MODEL,
-            email["subject"],
+            sent_draft.get("subject", ""),
+            sent_draft.get("orig_body", "")[:500],
             email["body_text"],
             email["from_name"],
         )
 
-        importance = triage["importance"]
-        await db_ops.update_email_importance(self.db, email["id"], importance)
-
-        logger.info(
-            "Email from %s classified as %s: %s",
-            email["from_name"],
-            importance,
-            triage.get("reason", ""),
+        # Save intent
+        await db_ops.save_reply_intent(
+            self.db,
+            email["id"],
+            intent_data["intent"],
+            intent_data["confidence"],
+            intent_data.get("reason", ""),
+            intent_data.get("suggested_action", ""),
         )
 
-        if importance == "high":
-            await self._notify_high_priority(email)
-        # Medium emails are batched (handled by batch_summary)
-        # Low emails are silently archived
+        # Send Telegram notification with intent classification
+        text = format_reply_intent(email, intent_data)
+        try:
+            await self.bot.send_message(
+                chat_id=config.TELEGRAM_AUTHORIZED_USER_ID,
+                text=text,
+                reply_markup=reply_intent_keyboard(email["id"]),
+                parse_mode="MarkdownV2",
+            )
+        except Exception as e:
+            logger.error("Failed to send reply intent notification: %s", e)
 
     async def _notify_high_priority(self, email: dict) -> None:
         """Generate draft and send Telegram notification for high-priority email."""

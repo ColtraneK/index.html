@@ -18,13 +18,18 @@ from bot.formatter import (
     format_draft_list,
     format_email_notification,
     format_full_email,
+    format_reply_intent,
+    format_rules_list,
 )
 from bot.keyboards import (
     confirm_send_keyboard,
     draft_action_keyboard,
+    followup_keyboard,
+    reply_intent_keyboard,
     settings_keyboard,
 )
 from db import operations as db_ops
+from rules import storage as rules_storage
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +57,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/check - Check for new emails now\n"
         "/drafts - View pending draft replies\n"
         "/summary - Today's email summary\n"
+        "/rules - View active email rules\n"
+        "/addrule <text> - Add a plain-English rule\n"
+        "/delrule <id> - Delete a rule\n"
         "/settings - Configure preferences\n"
         "/help - Show this help"
     )
@@ -196,10 +204,137 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 text = format_full_email(email)
                 await query.message.reply_text(text, parse_mode="MarkdownV2")
 
+    elif data.startswith("followup_draft:"):
+        draft_id = int(data.split(":")[1])
+        draft_data = await db_ops.get_draft_with_email(db, draft_id)
+        if draft_data:
+            # Generate a follow-up draft using the AI drafter
+            openai_client = context.application.bot_data.get("openai_client")
+            if openai_client:
+                from ai.drafter import draft_reply
+                followup_text = await draft_reply(
+                    openai_client,
+                    config.OPENAI_MODEL,
+                    f"Follow-up: {draft_data['subject']}",
+                    f"I previously replied but haven't heard back. Original subject: {draft_data['subject']}",
+                    draft_data["from_name"],
+                    config.USER_NAME,
+                    config.REPLY_TONE,
+                )
+                new_draft_id = await db_ops.save_draft(db, draft_data["email_id"], followup_text)
+                await query.edit_message_text(
+                    f"Follow-up draft #{new_draft_id} created.",
+                    reply_markup=draft_action_keyboard(new_draft_id),
+                )
+            else:
+                await query.edit_message_text("OpenAI client not configured.")
+        else:
+            await query.edit_message_text("Original draft not found.")
+
+    elif data.startswith("followup_dismiss:"):
+        draft_id = int(data.split(":")[1])
+        await db_ops.mark_followup_reminded(db, draft_id)
+        await query.edit_message_text("Follow-up reminder dismissed.")
+
+    elif data.startswith("followup_snooze:"):
+        draft_id = int(data.split(":")[1])
+        # Reset the reminded flag and push updated_at forward by 24h
+        await db.execute(
+            "UPDATE drafts SET followup_reminded = 0, updated_at = datetime('now') WHERE id = ?",
+            (draft_id,),
+        )
+        await db.commit()
+        await query.edit_message_text("Snoozed. Will remind again in 24h if no reply.")
+
+    elif data.startswith("intent_reply:"):
+        email_id = data.split(":")[1]
+        email = await db_ops.get_email(db, email_id)
+        if email:
+            openai_client = context.application.bot_data.get("openai_client")
+            if openai_client:
+                from ai.drafter import draft_reply
+                draft_text = await draft_reply(
+                    openai_client,
+                    config.OPENAI_MODEL,
+                    email["subject"],
+                    email["body_text"],
+                    email["from_name"],
+                    config.USER_NAME,
+                    config.REPLY_TONE,
+                )
+                new_draft_id = await db_ops.save_draft(db, email_id, draft_text)
+                await query.edit_message_text(
+                    f"Draft #{new_draft_id} created.",
+                    reply_markup=draft_action_keyboard(new_draft_id),
+                )
+            else:
+                await query.edit_message_text("OpenAI client not configured.")
+        else:
+            await query.edit_message_text("Email not found.")
+
+    elif data.startswith("intent_dismiss:"):
+        await query.edit_message_text("Reply notification dismissed.")
+
     elif data.startswith("tone:"):
         tone = data.split(":")[1]
         config.REPLY_TONE = tone
         await query.edit_message_text(f"Tone updated to: {tone}")
+
+
+@_authorized
+async def cmd_rules(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """List active rules."""
+    db = context.application.bot_data.get("db")
+    if not db:
+        await update.message.reply_text("Database not ready.")
+        return
+
+    rules = await rules_storage.get_all_rules(db)
+    text = format_rules_list(rules)
+    await update.message.reply_text(text, parse_mode="MarkdownV2")
+
+
+@_authorized
+async def cmd_addrule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Add a plain-English rule. Usage: /addrule <rule text>"""
+    db = context.application.bot_data.get("db")
+    if not db:
+        await update.message.reply_text("Database not ready.")
+        return
+
+    rule_text = " ".join(context.args) if context.args else ""
+    if not rule_text:
+        await update.message.reply_text(
+            "Usage: /addrule <rule in plain English>\n\n"
+            "Examples:\n"
+            '  /addrule Emails from @acme.com are always high priority\n'
+            '  /addrule Archive anything from noreply@\n'
+            '  /addrule Always draft a reply to emails mentioning "showing"'
+        )
+        return
+
+    rule_id = await rules_storage.add_rule(db, rule_text)
+    await update.message.reply_text(f"Rule #{rule_id} added: {rule_text}")
+
+
+@_authorized
+async def cmd_delrule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Delete a rule. Usage: /delrule <id>"""
+    db = context.application.bot_data.get("db")
+    if not db:
+        await update.message.reply_text("Database not ready.")
+        return
+
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("Usage: /delrule <rule_id>")
+        return
+
+    rule_id = int(context.args[0])
+    deleted = await rules_storage.delete_rule(db, rule_id)
+    if deleted:
+        await update.message.reply_text(f"Rule #{rule_id} deleted.")
+    else:
+        await update.message.reply_text(f"Rule #{rule_id} not found.")
 
 
 @_authorized
@@ -230,6 +365,9 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("drafts", cmd_drafts))
     app.add_handler(CommandHandler("summary", cmd_summary))
     app.add_handler(CommandHandler("settings", cmd_settings))
+    app.add_handler(CommandHandler("rules", cmd_rules))
+    app.add_handler(CommandHandler("addrule", cmd_addrule))
+    app.add_handler(CommandHandler("delrule", cmd_delrule))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))

@@ -1,6 +1,6 @@
 """Async CRUD operations for the email copilot database."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import aiosqlite
 
@@ -123,3 +123,62 @@ async def get_today_emails(db: aiosqlite.Connection) -> list[dict]:
     )
     rows = await cursor.fetchall()
     return [dict(row) for row in rows]
+
+
+# --- Reply intent operations ---
+
+async def save_reply_intent(
+    db: aiosqlite.Connection,
+    email_id: str,
+    intent: str,
+    confidence: float,
+    reason: str,
+    suggested_action: str,
+) -> int:
+    cursor = await db.execute(
+        """INSERT INTO reply_intents (email_id, intent, confidence, reason, suggested_action)
+           VALUES (?, ?, ?, ?, ?)""",
+        (email_id, intent, confidence, reason, suggested_action),
+    )
+    await db.commit()
+    return cursor.lastrowid
+
+
+async def get_reply_intent(db: aiosqlite.Connection, email_id: str) -> dict | None:
+    cursor = await db.execute(
+        "SELECT * FROM reply_intents WHERE email_id = ? ORDER BY created_at DESC LIMIT 1",
+        (email_id,),
+    )
+    row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+# --- Follow-up operations ---
+
+async def get_overdue_followups(db: aiosqlite.Connection, hours: int = 48) -> list[dict]:
+    """Get sent drafts where no reply has been received within the time window."""
+    cutoff = (datetime.now() - timedelta(hours=hours)).isoformat()
+    cursor = await db.execute(
+        """SELECT d.*, e.from_address, e.from_name, e.subject, e.thread_id, e.id as email_id
+           FROM drafts d JOIN emails e ON d.email_id = e.id
+           WHERE d.status = 'sent'
+             AND d.followup_reminded = 0
+             AND d.updated_at <= ?
+             AND NOT EXISTS (
+               SELECT 1 FROM emails e2
+               WHERE e2.thread_id = e.thread_id
+                 AND e2.id != e.id
+                 AND e2.received_at > d.updated_at
+             )
+           ORDER BY d.updated_at ASC""",
+        (cutoff,),
+    )
+    rows = await cursor.fetchall()
+    return [dict(row) for row in rows]
+
+
+async def mark_followup_reminded(db: aiosqlite.Connection, draft_id: int) -> None:
+    await db.execute(
+        "UPDATE drafts SET followup_reminded = 1 WHERE id = ?", (draft_id,)
+    )
+    await db.commit()

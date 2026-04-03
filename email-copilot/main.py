@@ -15,6 +15,7 @@ import config
 from bot.handlers import register_handlers
 from db.models import init_db
 from gmail.client import GmailClient
+from scheduler.followups import check_followups
 from scheduler.poller import EmailPoller
 
 logging.basicConfig(
@@ -65,6 +66,7 @@ async def main() -> None:
     # Store references in bot_data for handlers to access
     app.bot_data["db"] = db
     app.bot_data["gmail_client"] = gmail_client
+    app.bot_data["openai_client"] = openai_client
     app.bot_data["poll_fn"] = poller.poll
 
     # Set up scheduler
@@ -82,6 +84,14 @@ async def main() -> None:
         seconds=config.BATCH_SUMMARY_INTERVAL_SECONDS,
         id="batch_summary",
         name="Batch Summary",
+    )
+    scheduler.add_job(
+        check_followups,
+        "interval",
+        seconds=config.FOLLOWUP_CHECK_INTERVAL_SECONDS,
+        args=[db, app.bot],
+        id="followup_check",
+        name="Follow-up Check",
     )
 
     logger.info(

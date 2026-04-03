@@ -74,6 +74,50 @@ def format_batch_summary(emails: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def format_reply_intent(email: dict, intent_data: dict) -> str:
+    """Format a reply intent classification notification."""
+    from_display = email.get("from_name") or email.get("from_address", "Unknown")
+    subject = email.get("subject", "(no subject)")
+    intent = intent_data.get("intent", "unknown")
+    confidence = intent_data.get("confidence", 0.0)
+    reason = intent_data.get("reason", "")
+    action = intent_data.get("suggested_action", "")
+
+    intent_icons = {
+        "interested": "+",
+        "question": "?",
+        "not_interested": "-",
+        "wants_to_book": "!",
+        "referral": ">",
+        "unsubscribe": "x",
+        "out_of_office": "~",
+    }
+    icon = intent_icons.get(intent, "?")
+
+    confidence_pct = int(confidence * 100)
+
+    return (
+        f"*Reply Received* {_esc(icon)}\n\n"
+        f"*From:* {_esc(from_display)}\n"
+        f"*Subject:* {_esc(subject)}\n"
+        f"*Intent:* {_esc(intent.replace('_', ' ').title())} "
+        f"\\({confidence_pct}% confident\\)\n"
+        f"*Reason:* {_esc(reason)}\n\n"
+        f"*Suggested:* {_esc(action)}"
+    )
+
+
+def format_rules_list(rules: list[dict]) -> str:
+    """Format list of active rules."""
+    if not rules:
+        return "No active rules\\. Use /addrule to create one\\."
+
+    lines = ["*Active Rules:*\n"]
+    for r in rules:
+        lines.append(f"\\#{r['id']} \\- {_esc(r['rule_text'])}")
+    return "\n".join(lines)
+
+
 def _esc(text: str) -> str:
     """Escape text for Telegram MarkdownV2."""
     return escape_markdown(str(text), version=2)

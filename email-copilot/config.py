@@ -48,5 +48,9 @@ USER_NAME: str = os.getenv("USER_NAME", "User")
 USER_EMAIL: str = os.getenv("USER_EMAIL", "")
 REPLY_TONE: str = os.getenv("REPLY_TONE", "professional")
 
+# Follow-ups
+FOLLOWUP_CHECK_INTERVAL_SECONDS: int = int(os.getenv("FOLLOWUP_CHECK_INTERVAL_SECONDS", "3600"))
+FOLLOWUP_WINDOW_HOURS: int = int(os.getenv("FOLLOWUP_WINDOW_HOURS", "48"))
+
 # Database
 DB_PATH: Path = BASE_DIR / "copilot.db"
